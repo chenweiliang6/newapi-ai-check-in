@@ -303,6 +303,7 @@ class LinuxDoSignIn:
 
                     # 从 localStorage 获取 user 对象并提取 id
                     api_user = None
+                    current_url = page.url
                     try:
                         try:
                             await page.wait_for_function('localStorage.getItem("user") !== null', timeout=10000)
@@ -348,7 +349,7 @@ class LinuxDoSignIn:
                     else:
                         print(f"⚠️ {self.account_name}: OAuth callback received but no user ID found")
                         await take_screenshot(page, "oauth_failed_no_user_id_bypass", self.account_name)
-                        parsed_url = urlparse(page.url)
+                        parsed_url = urlparse(current_url)
                         query_params = parse_qs(parsed_url.query)
 
                         # 如果 query 中包含 code，说明 OAuth 回调成功
@@ -368,7 +369,10 @@ class LinuxDoSignIn:
                                 )
                             return True, query_params, browser_headers
                         else:
-                            print(f"❌ {self.account_name}: OAuth failed, no code in callback")
+                            print(
+                                f"❌ {self.account_name}: OAuth failed, no code in callback\n"
+                                f"Parsed url is: {current_url}"
+                            )
                             return (
                                 False,
                                 {
