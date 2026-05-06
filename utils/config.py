@@ -243,6 +243,7 @@ class AccountConfig:
     linux_do: List["OAuthAccountConfig"] | None = None  # 改为列表类型
     github: List["OAuthAccountConfig"] | None = None  # 改为列表类型
     site: List["SiteAccountConfig"] | None = None
+    system_access_token: dict | str = ""
     proxy: dict | None = None
     extra: dict = field(default_factory=dict)  # 存储额外的配置字段
 
@@ -260,24 +261,26 @@ class AccountConfig:
             data: 账号配置字典
             linux_do_accounts: 解析后的 Linux.do OAuth 账号列表（可选）
             github_accounts: 解析后的 GitHub OAuth 账号列表（可选）
+            site_accounts: 解析后的站点账号列表（可选）
         """
         provider = data.get("provider", "anyrouter")
         name = data.get("name")
 
         # Handle different authentication types
+        api_user = data.get("api_user", "")
         cookies = data.get("cookies", "")
+        system_access_token = data.get("system_access_token", "")
         proxy = data.get("proxy")
 
-        # 提取已知字段
-        known_keys = {"provider", "name", "cookies", "api_user", "linux.do", "github", "site", "proxy"}
-        # 收集额外的配置字段
+        known_keys = {"provider", "name", "cookies", "api_user", "linux.do", "github", "site", "system_access_token", "proxy"}
         extra = {k: v for k, v in data.items() if k not in known_keys}
 
         return cls(
             provider=provider,
             name=name if name else None,
+            api_user=api_user,
             cookies=cookies,
-            api_user=data.get("api_user", ""),
+            system_access_token=system_access_token,
             linux_do=linux_do_accounts,
             github=github_accounts,
             site=site_accounts,
@@ -356,6 +359,8 @@ class AppConfig:
 
         print(f"❌ Account {account_index + 1} site configuration must be dict or array")
         return None
+
+
 
     @classmethod
     def load_from_env(
@@ -633,6 +638,25 @@ class AppConfig:
                 linuxdo_auth_path="/api/oauth/linuxdo",
                 aliyun_captcha=False,
                 bypass_method=None,
+            ),
+            "muyuan": ProviderConfig(
+                name="muyuan",
+                origin="https://muyuan.do",
+                login_path="/login",
+                status_path="/api/status",
+                auth_state_path="/api/oauth/state",
+                check_in_path="/api/user/checkin",  # 标准 newapi checkin 接口
+                check_in_status=True,  # 使用标准签到状态查询
+                user_info_path="/api/user/self",
+                topup_path="/api/user/topup",
+                get_cdk=None,
+                api_user_key="new-api-user",
+                github_client_id=None,
+                github_auth_path="/api/oauth/github",
+                linuxdo_client_id=None,
+                linuxdo_auth_path="/api/oauth/linuxdo",
+                aliyun_captcha=False,
+                bypass_method="cf_clearance",
             ),
             # "neb": ProviderConfig(
             #     name="neb",
@@ -993,6 +1017,7 @@ class AppConfig:
                 has_linux_do = "linux.do" in account
                 has_github = "github" in account
                 has_site = "site" in account
+                has_system_access_token = "system_access_token" in account
                 has_cookies = "cookies" in account
 
                 # 解析 linux.do 配置（支持 bool、单个账号、多个账号）
@@ -1028,6 +1053,19 @@ class AppConfig:
                         print(f"⚠️ {account_name} site configuration is invalid, skipping")
                         continue
 
+                # 验证 system_access_token 配置
+                valid_system_access_token = False
+                if has_system_access_token:
+                    system_access_token_value = account.get("system_access_token")
+                    api_user = account.get("api_user")
+
+                    if system_access_token_value and api_user:
+                        valid_system_access_token = True
+                    elif system_access_token_value and not api_user:
+                        print(f"⚠️ {account_name} with system_access_token must have api_user field")
+                    elif not system_access_token_value:
+                        print(f"⚠️ {account_name} system_access_token is empty")
+
                 # 验证 cookies 配置
                 valid_cookies = False
                 if has_cookies:
@@ -1045,16 +1083,17 @@ class AppConfig:
                 has_valid_linux_do = linux_do_accounts is not None and len(linux_do_accounts) > 0
                 has_valid_github = github_accounts is not None and len(github_accounts) > 0
                 has_valid_site = site_accounts is not None and len(site_accounts) > 0
-                has_valid_cookies = valid_cookies
 
-                if not has_valid_linux_do and not has_valid_github and not has_valid_site and not has_valid_cookies:
+                if not has_valid_linux_do and not has_valid_github and not has_valid_site and not valid_system_access_token and not valid_cookies:
                     print(
-                        f"⚠️ {account_name} must have at least one valid authentication method (site, linux.do, github, or cookies), skipping"
+                        f"⚠️ {account_name} must have at least one valid authentication method (site, linux.do, github, system_access_token, or cookies), skipping"
                     )
                     continue
 
-                # 创建 AccountConfig，传入解析后的 OAuth 账号列表
-                account_config = AccountConfig.from_dict(account, linux_do_accounts, github_accounts, site_accounts)
+                # 创建 AccountConfig，传入解析后的账号列表
+                account_config = AccountConfig.from_dict(
+                    account, linux_do_accounts, github_accounts, site_accounts
+                )
                 accounts.append(account_config)
 
             return accounts

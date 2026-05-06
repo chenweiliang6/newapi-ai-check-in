@@ -936,7 +936,6 @@ class CheckIn:
         cookies: dict,
         common_headers: dict,
         api_user: str | int,
-        impersonate: str = "firefox135",
     ) -> tuple[bool, dict]:
         """使用已有 cookies 执行签到操作
         
@@ -949,7 +948,13 @@ class CheckIn:
             f"ℹ️ {self.account_name}: Executing check-in with existing cookies (using proxy: {'true' if self.http_proxy_config else 'false'})"
         )
 
+        # 根据 User-Agent 自动推断 impersonate 值
+        user_agent = common_headers.get("User-Agent", "")
+        impersonate = get_curl_cffi_impersonate(user_agent) if user_agent else "firefox135"
+        
         session = curl_requests.Session(impersonate=impersonate, proxy=self.http_proxy_config, timeout=30)
+        if impersonate:
+            print(f"ℹ️ {self.account_name}: Using curl_cffi Session with impersonate={impersonate}")
         
         try:
             # 打印 cookies 的键和值
@@ -1026,6 +1031,110 @@ class CheckIn:
         except Exception as e:
             print(f"❌ {self.account_name}: Error occurred during check-in process - {e}")
             return False, {"error": "Error occurred during check-in process"}
+        finally:
+            session.close()
+
+    async def check_in_with_system_access_token(
+        self,
+        access_token: str,
+        bypass_cookies: dict,
+        common_headers: dict,
+        api_user: str | int,
+    ) -> tuple[bool, dict]:
+        """使用 system access token 执行签到操作
+        
+        Args:
+            access_token: 系统访问令牌
+            bypass_cookies: 绕过 cookies（WAF/CF）
+            common_headers: 公用请求头（包含 User-Agent 和可能的 Client Hints）
+            api_user: API 用户 ID
+        """
+        print(
+            f"ℹ️ {self.account_name}: Executing check-in with system access token (using proxy: {'true' if self.http_proxy_config else 'false'})"
+        )
+
+        # 根据 User-Agent 自动推断 impersonate 值
+        user_agent = common_headers.get("User-Agent", "")
+        impersonate = get_curl_cffi_impersonate(user_agent) if user_agent else "firefox135"
+        
+        session = curl_requests.Session(impersonate=impersonate, proxy=self.http_proxy_config, timeout=30)
+        if impersonate:
+            print(f"ℹ️ {self.account_name}: Using curl_cffi Session with impersonate={impersonate}")
+        
+        try:
+            # 设置 bypass cookies
+            if bypass_cookies:
+                session.cookies.update(bypass_cookies)
+
+            # 使用传入的公用请求头，并添加动态头部
+            headers = common_headers.copy()
+            headers["Authorization"] = f"Bearer {access_token}"
+            headers[self.provider_config.api_user_key] = f"{api_user}"
+            headers["Referer"] = self.provider_config.get_login_url()
+            headers["Origin"] = self.provider_config.origin
+
+            # 检查是否需要手动签到
+            if self.provider_config.needs_manual_check_in():
+                # 如果配置了签到状态查询，先检查是否已签到
+                check_in_status_func = self.provider_config.get_check_in_status_func()
+                if check_in_status_func:
+                    checked_in_today = check_in_status_func(
+                        provider_config=self.provider_config,
+                        account_config=self.account_config,
+                        cookies=session.cookies.get_dict(),
+                        headers=headers,
+                    )
+                    if checked_in_today:
+                        print(f"ℹ️ {self.account_name}: Already checked in today, skipping check-in")
+                    else:
+                        # 未签到，执行签到
+                        check_in_result = self.execute_check_in(session, headers, api_user)
+                        if not check_in_result.get("success"):
+                            return False, {"error": check_in_result.get("error", "Check-in failed")}
+                        # 签到成功后再次查询状态（显示最新状态）
+                        check_in_status_func(
+                            provider_config=self.provider_config,
+                            account_config=self.account_config,
+                            cookies=session.cookies.get_dict(),
+                            headers=headers,
+                        )
+                else:
+                    # 没有配置签到状态查询函数，直接执行签到
+                    check_in_result = self.execute_check_in(session, headers, api_user)
+                    if not check_in_result.get("success"):
+                        return False, {"error": check_in_result.get("error", "Check-in failed")}
+            else:
+                print(f"ℹ️ {self.account_name}: Check-in completed automatically (triggered by user info request)")
+
+            # 如果需要手动 topup（配置了 topup_path 和 get_cdk），执行 topup
+            if self.provider_config.needs_manual_topup():
+                print(f"ℹ️ {self.account_name}: Provider requires manual topup, executing...")
+                topup_result = await self.execute_topup(headers, session.cookies.get_dict(), api_user)
+                if topup_result.get("topup_count", 0) > 0:
+                    print(
+                        f"ℹ️ {self.account_name}: Topup completed - "
+                        f"{topup_result.get('topup_success_count', 0)}/{topup_result.get('topup_count', 0)} successful"
+                    )
+                if not topup_result.get("success"):
+                    error_msg = topup_result.get("error") or "Topup failed"
+                    print(f"❌ {self.account_name}: Topup failed, stopping check-in process")
+                    return False, {"error": error_msg}
+
+            user_info = await self.get_user_info(session, headers)
+            if user_info and user_info.get("success"):
+                success_msg = user_info.get("display", "User info retrieved successfully")
+                print(f"✅ {self.account_name}: {success_msg}")
+                return True, user_info
+            elif user_info:
+                error_msg = user_info.get("error", "Unknown error")
+                print(f"❌ {self.account_name}: {error_msg}")
+                return False, {"error": "Failed to get user info"}
+            else:
+                return False, {"error": "No user info available"}
+
+        except Exception as e:
+            print(f"❌ {self.account_name}: Error occurred during check-in process - {e}")
+            return False, {"error": f"Error occurred during check-in process - {e}"}
         finally:
             session.close()
 
@@ -1811,6 +1920,7 @@ class CheckIn:
 
         # 解析账号配置
         cookies_data = self.account_config.cookies
+        system_access_token_data = self.account_config.system_access_token
         github_accounts = self.account_config.github  # 现在是 List[OAuthAccountConfig] 类型
         linuxdo_accounts = self.account_config.linux_do  # 现在是 List[OAuthAccountConfig] 类型
         site_accounts = self.account_config.site
@@ -1842,6 +1952,29 @@ class CheckIn:
             except Exception as e:
                 print(f"❌ {self.account_name}: Cookies authentication error: {e}")
                 results.append(("cookies", False, {"error": str(e)}))
+
+        # 尝试 system access token 认证
+        if system_access_token_data:
+            print(f"\nℹ️ {self.account_name}: Trying system access token authentication")
+            try:
+                api_user = self.account_config.api_user
+                if not api_user:
+                    print(f"❌ {self.account_name}: API user identifier not found for system access token")
+                    results.append(("system_access_token", False, {"error": "API user identifier not found"}))
+                else:
+                    # 使用 system access token 执行签到，传入公用请求头
+                    success, user_info = await self.check_in_with_system_access_token(
+                        system_access_token_data, bypass_cookies, common_headers, api_user
+                    )
+                    if success:
+                        print(f"✅ {self.account_name}: System access token authentication successful")
+                        results.append(("system_access_token", True, user_info))
+                    else:
+                        print(f"❌ {self.account_name}: System access token authentication failed")
+                        results.append(("system_access_token", False, user_info))
+            except Exception as e:
+                print(f"❌ {self.account_name}: System access token authentication error: {e}")
+                results.append(("system_access_token", False, {"error": str(e)}))
 
         # 尝试 GitHub 认证（支持多个账号）
         if github_accounts:
