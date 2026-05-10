@@ -936,6 +936,7 @@ class CheckIn:
         cookies: dict,
         common_headers: dict,
         api_user: str | int,
+        impersonate: str | None = None, 
     ) -> tuple[bool, dict]:
         """使用已有 cookies 执行签到操作
         
